@@ -1,7 +1,19 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import GlobeGL, { type GlobeInstance } from 'globe.gl';
-import * as topojson from 'topojson-client';
 import type { GlobalVotes, QuestionOption } from '@world-pulse/shared';
+
+// Check WebGL support
+function isWebGLSupported(): boolean {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    return !!gl;
+  } catch {
+    return false;
+  }
+}
+
+// Type alias for globe instance (dynamically imported)
+type GlobeInstance = any;
 
 // ISO 3166-1 numeric to alpha-2 mapping
 const COUNTRY_CODE_MAP: Record<string, string> = {
@@ -49,10 +61,11 @@ interface CountryDetails {
 
 export function GlobeExplorer({ votes, options, onClose }: GlobeExplorerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const globeRef = useRef<GlobeInstance | null>(null);
+  const globeRef = useRef<GlobeInstance>(null);
   const [polygons, setPolygons] = useState<any[]>([]);
   const [selectedCountry, setSelectedCountry] = useState<CountryDetails | null>(null);
   const [autoRotate, setAutoRotate] = useState(true);
+  const [isSupported, setIsSupported] = useState(true);
 
   // Get countries with votes, sorted by total
   const countriesWithVotes = votes?.byCountry
@@ -145,69 +158,103 @@ export function GlobeExplorer({ votes, options, onClose }: GlobeExplorerProps) {
     }
   }, [votes, options]);
 
+  // Initialize globe with dynamic imports
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const globe = new GlobeGL(containerRef.current)
-      .globeImageUrl('//unpkg.com/three-globe/example/img/earth-dark.jpg')
-      .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
-      .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
-      .showAtmosphere(true)
-      .atmosphereColor('#3a82f7')
-      .atmosphereAltitude(0.2)
-      .polygonAltitude((d: any) => {
-        const cc = getCountryCode(d);
-        const hasVotes = votes?.byCountry.some(
-          (c) => c.countryCode === cc && c.total > 0,
-        );
-        return hasVotes ? 0.03 : 0.01;
-      })
-      .polygonCapColor(() => 'rgba(100, 116, 139, 0.2)')
-      .polygonSideColor(() => 'rgba(100, 116, 139, 0.1)')
-      .polygonStrokeColor(() => 'rgba(100, 116, 139, 0.5)')
-      .polygonLabel((d: any) => {
-        const cc = getCountryCode(d);
-        const countryVotes = votes?.byCountry.find((c) => c.countryCode === cc);
-        if (!countryVotes || countryVotes.total === 0) {
-          return `<div class="globe-explorer-label">${d.properties?.name || 'Unknown'}<br/><small>No votes yet</small></div>`;
-        }
-        return `<div class="globe-explorer-label">${d.properties?.name || 'Unknown'}<br/><strong>${countryVotes.total.toLocaleString()} votes</strong><br/><small>Click for details</small></div>`;
-      })
-      .onPolygonClick(handleCountryClick);
+    // Check WebGL support first
+    if (!isWebGLSupported()) {
+      console.warn('WebGL not supported, globe explorer will not render');
+      setIsSupported(false);
+      return;
+    }
 
-    globe.controls().autoRotate = true;
-    globe.controls().autoRotateSpeed = 0.5;
-    globe.controls().enableZoom = true;
-    globe.controls().minDistance = 150;
-    globe.controls().maxDistance = 500;
-    globe.pointOfView({ lat: 20, lng: 0, altitude: 2.2 });
+    let globe: any = null;
+    let destroyed = false;
+    let resizeHandler: (() => void) | null = null;
 
-    globeRef.current = globe;
+    async function initGlobe() {
+      try {
+        // Dynamic imports to avoid loading if WebGL fails
+        const [GlobeGL, topojson] = await Promise.all([
+          import('globe.gl').then(m => m.default),
+          import('topojson-client'),
+        ]);
 
-    const handleResize = () => {
-      if (containerRef.current && globeRef.current) {
-        globeRef.current
-          .width(containerRef.current.clientWidth)
-          .height(containerRef.current.clientHeight);
-      }
-    };
+        if (destroyed || !containerRef.current) return;
 
-    window.addEventListener('resize', handleResize);
-    handleResize();
+        globe = new GlobeGL(containerRef.current)
+          .globeImageUrl('//unpkg.com/three-globe/example/img/earth-dark.jpg')
+          .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
+          .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
+          .showAtmosphere(true)
+          .atmosphereColor('#3a82f7')
+          .atmosphereAltitude(0.2)
+          .polygonAltitude((d: any) => {
+            const cc = getCountryCode(d);
+            const hasVotes = votes?.byCountry.some(
+              (c) => c.countryCode === cc && c.total > 0,
+            );
+            return hasVotes ? 0.03 : 0.01;
+          })
+          .polygonCapColor(() => 'rgba(100, 116, 139, 0.2)')
+          .polygonSideColor(() => 'rgba(100, 116, 139, 0.1)')
+          .polygonStrokeColor(() => 'rgba(100, 116, 139, 0.5)')
+          .polygonLabel((d: any) => {
+            const cc = getCountryCode(d);
+            const countryVotes = votes?.byCountry.find((c) => c.countryCode === cc);
+            if (!countryVotes || countryVotes.total === 0) {
+              return `<div class="globe-explorer-label">${d.properties?.name || 'Unknown'}<br/><small>No votes yet</small></div>`;
+            }
+            return `<div class="globe-explorer-label">${d.properties?.name || 'Unknown'}<br/><strong>${countryVotes.total.toLocaleString()} votes</strong><br/><small>Click for details</small></div>`;
+          })
+          .onPolygonClick(handleCountryClick);
 
-    // Load country polygons
-    fetch('https://unpkg.com/world-atlas@2/countries-110m.json')
-      .then((res) => res.json())
-      .then((countries) => {
+        globe.controls().autoRotate = true;
+        globe.controls().autoRotateSpeed = 0.5;
+        globe.controls().enableZoom = true;
+        globe.controls().minDistance = 150;
+        globe.controls().maxDistance = 500;
+        globe.pointOfView({ lat: 20, lng: 0, altitude: 2.2 });
+
+        globeRef.current = globe;
+
+        resizeHandler = () => {
+          if (containerRef.current && globeRef.current) {
+            globeRef.current
+              .width(containerRef.current.clientWidth)
+              .height(containerRef.current.clientHeight);
+          }
+        };
+
+        window.addEventListener('resize', resizeHandler);
+        resizeHandler();
+
+        // Load country polygons
+        const res = await fetch('https://unpkg.com/world-atlas@2/countries-110m.json');
+        const countries = await res.json();
         const land = topojson.feature(countries, countries.objects.countries) as any;
-        setPolygons(land.features);
-        globe.polygonsData(land.features);
-      })
-      .catch(console.error);
+
+        if (!destroyed) {
+          setPolygons(land.features);
+          globe.polygonsData(land.features);
+        }
+      } catch (err) {
+        console.error('Failed to initialize globe explorer:', err);
+        setIsSupported(false);
+      }
+    }
+
+    initGlobe();
 
     return () => {
-      window.removeEventListener('resize', handleResize);
-      globeRef.current?._destructor?.();
+      destroyed = true;
+      if (resizeHandler) {
+        window.removeEventListener('resize', resizeHandler);
+      }
+      if (globe?._destructor) {
+        globe._destructor();
+      }
     };
   }, [handleCountryClick, votes]);
 
@@ -248,6 +295,18 @@ export function GlobeExplorer({ votes, options, onClose }: GlobeExplorerProps) {
       globeRef.current.controls().autoRotate = autoRotate;
     }
   }, [autoRotate]);
+
+  // Close modal if WebGL not supported
+  useEffect(() => {
+    if (!isSupported) {
+      onClose();
+    }
+  }, [isSupported, onClose]);
+
+  // Don't render if WebGL not supported
+  if (!isSupported) {
+    return null;
+  }
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900">

@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import GlobeGL, { type GlobeInstance } from 'globe.gl';
-import * as topojson from 'topojson-client';
 import type { GlobalVotes, QuestionOption } from '@world-pulse/shared';
+
+// Check WebGL support
+function isWebGLSupported(): boolean {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    return !!gl;
+  } catch {
+    return false;
+  }
+}
 
 // ISO 3166-1 numeric to alpha-2 mapping (common countries)
 const COUNTRY_CODE_MAP: Record<string, string> = {
@@ -32,66 +41,12 @@ interface CountryDetails {
 
 export function Globe({ votes, options }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const globeRef = useRef<GlobeInstance | null>(null);
+  const globeRef = useRef<any>(null);
   const [polygons, setPolygons] = useState<any[]>([]);
   const [selectedCountry, setSelectedCountry] = useState<CountryDetails | null>(null);
   const [pulseRings, setPulseRings] = useState<{ lat: number; lng: number; color: string }[]>([]);
   const prevVotesRef = useRef<GlobalVotes | null>(null);
-
-  // Track vote changes for pulse animations
-  useEffect(() => {
-    if (!votes || !prevVotesRef.current) {
-      prevVotesRef.current = votes;
-      return;
-    }
-
-    const newPulses: { lat: number; lng: number; color: string }[] = [];
-
-    // Find countries with new votes
-    for (const cv of votes.byCountry) {
-      if (cv.countryCode === 'XX' || cv.countryCode === 'T1') continue;
-
-      const prevCountry = prevVotesRef.current.byCountry.find(
-        (p) => p.countryCode === cv.countryCode,
-      );
-      const prevTotal = prevCountry?.total || 0;
-
-      if (cv.total > prevTotal) {
-        // New votes in this country - add pulse
-        const coords = getCountryCoords(cv.countryCode);
-        if (coords) {
-          const winner = cv.votes.reduce((a, b) => (a.count > b.count ? a : b));
-          const color = options?.find((o) => o.id === winner.optionId)?.color || '#3B82F6';
-          newPulses.push({ ...coords, color });
-        }
-      }
-    }
-
-    if (newPulses.length > 0) {
-      setPulseRings((prev) => [...prev, ...newPulses]);
-      // Clear pulses after animation
-      setTimeout(() => {
-        setPulseRings((prev) => prev.slice(newPulses.length));
-      }, 2000);
-    }
-
-    prevVotesRef.current = votes;
-  }, [votes, options]);
-
-  // Update pulse rings on globe
-  useEffect(() => {
-    if (!globeRef.current) return;
-
-    globeRef.current
-      .ringsData(pulseRings)
-      .ringColor((d: any) => (t: number) => {
-        const color = hexToRgba(d.color, 1 - t);
-        return color;
-      })
-      .ringMaxRadius(4)
-      .ringPropagationSpeed(2)
-      .ringRepeatPeriod(800);
-  }, [pulseRings]);
+  const [isSupported, setIsSupported] = useState(true);
 
   const handleCountryClick = useCallback(
     (polygon: any) => {
@@ -120,7 +75,6 @@ export function Globe({ votes, options }: GlobeProps) {
         };
       });
 
-      // Sort by count descending
       breakdown.sort((a, b) => b.count - a.count);
 
       setSelectedCountry({
@@ -130,7 +84,6 @@ export function Globe({ votes, options }: GlobeProps) {
         breakdown,
       });
 
-      // Focus on the country
       const coords = getCountryCoords(cc);
       if (coords && globeRef.current) {
         globeRef.current.pointOfView(
@@ -142,119 +95,181 @@ export function Globe({ votes, options }: GlobeProps) {
     [votes, options],
   );
 
+  // Initialize globe with dynamic imports
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const globe = new GlobeGL(containerRef.current)
-      .globeImageUrl('//unpkg.com/three-globe/example/img/earth-dark.jpg')
-      .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
-      .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
-      .showAtmosphere(true)
-      .atmosphereColor('#3a82f7')
-      .atmosphereAltitude(0.15)
-      .polygonAltitude((d: any) => {
-        // Slight elevation for countries with votes
-        const cc = getCountryCode(d);
-        const hasVotes = votes?.byCountry.some(
-          (c) => c.countryCode === cc && c.total > 0,
-        );
-        return hasVotes ? 0.02 : 0.01;
-      })
-      .polygonCapColor(() => 'rgba(100, 116, 139, 0.2)')
-      .polygonSideColor(() => 'rgba(100, 116, 139, 0.1)')
-      .polygonStrokeColor(() => 'rgba(100, 116, 139, 0.4)')
-      .polygonLabel((d: any) => {
-        const cc = getCountryCode(d);
-        const countryVotes = votes?.byCountry.find((c) => c.countryCode === cc);
-        if (!countryVotes || countryVotes.total === 0) {
-          return `<div class="globe-label">${d.properties?.name || 'Unknown'}<br/><small>No votes yet</small></div>`;
-        }
-        return `<div class="globe-label">${d.properties?.name || 'Unknown'}<br/><small>${countryVotes.total.toLocaleString()} votes</small><br/><small class="click-hint">Click for details</small></div>`;
-      })
-      .onPolygonClick(handleCountryClick);
+    // Check WebGL support first
+    if (!isWebGLSupported()) {
+      console.warn('WebGL not supported, globe will not render');
+      setIsSupported(false);
+      return;
+    }
 
-    globe.controls().autoRotate = true;
-    globe.controls().autoRotateSpeed = 0.3;
-    globe.controls().enableZoom = true;
-    globe.pointOfView({ lat: 20, lng: 0, altitude: 2.5 });
+    let globe: any = null;
+    let destroyed = false;
 
-    globeRef.current = globe;
+    async function initGlobe() {
+      try {
+        // Dynamic imports to avoid loading if WebGL fails
+        const [GlobeGL, topojson] = await Promise.all([
+          import('globe.gl').then(m => m.default),
+          import('topojson-client'),
+        ]);
 
-    const handleResize = () => {
-      if (containerRef.current && globeRef.current) {
-        globeRef.current
-          .width(containerRef.current.clientWidth)
-          .height(containerRef.current.clientHeight);
-      }
-    };
+        if (destroyed || !containerRef.current) return;
 
-    window.addEventListener('resize', handleResize);
-    handleResize();
+        globe = new GlobeGL(containerRef.current)
+          .globeImageUrl('//unpkg.com/three-globe/example/img/earth-dark.jpg')
+          .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
+          .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
+          .showAtmosphere(true)
+          .atmosphereColor('#3a82f7')
+          .atmosphereAltitude(0.15)
+          .polygonAltitude(() => 0.01)
+          .polygonCapColor(() => 'rgba(100, 116, 139, 0.2)')
+          .polygonSideColor(() => 'rgba(100, 116, 139, 0.1)')
+          .polygonStrokeColor(() => 'rgba(100, 116, 139, 0.4)')
+          .polygonLabel((d: any) => {
+            const cc = getCountryCode(d);
+            const countryVotes = votes?.byCountry.find((c) => c.countryCode === cc);
+            if (!countryVotes || countryVotes.total === 0) {
+              return `<div class="globe-label">${d.properties?.name || 'Unknown'}<br/><small>No votes yet</small></div>`;
+            }
+            return `<div class="globe-label">${d.properties?.name || 'Unknown'}<br/><small>${countryVotes.total.toLocaleString()} votes</small><br/><small class="click-hint">Click for details</small></div>`;
+          })
+          .onPolygonClick(handleCountryClick);
 
-    // Load country polygons
-    fetch('https://unpkg.com/world-atlas@2/countries-110m.json')
-      .then((res) => res.json())
-      .then((countries) => {
+        globe.controls().autoRotate = true;
+        globe.controls().autoRotateSpeed = 0.3;
+        globe.controls().enableZoom = true;
+        globe.pointOfView({ lat: 20, lng: 0, altitude: 2.5 });
+
+        globeRef.current = globe;
+
+        const handleResize = () => {
+          if (containerRef.current && globeRef.current) {
+            globeRef.current
+              .width(containerRef.current.clientWidth)
+              .height(containerRef.current.clientHeight);
+          }
+        };
+
+        window.addEventListener('resize', handleResize);
+        handleResize();
+
+        // Load country polygons
+        const res = await fetch('https://unpkg.com/world-atlas@2/countries-110m.json');
+        const countries = await res.json();
         const land = topojson.feature(countries, countries.objects.countries) as any;
-        setPolygons(land.features);
-        globe.polygonsData(land.features);
-      })
-      .catch(console.error);
+
+        if (!destroyed) {
+          setPolygons(land.features);
+          globe.polygonsData(land.features);
+        }
+      } catch (err) {
+        console.error('Failed to initialize globe:', err);
+        setIsSupported(false);
+      }
+    }
+
+    initGlobe();
 
     return () => {
-      window.removeEventListener('resize', handleResize);
-      globeRef.current?._destructor?.();
+      destroyed = true;
+      if (globe?._destructor) {
+        globe._destructor();
+      }
     };
-  }, [handleCountryClick]);
+  }, [handleCountryClick, votes]);
+
+  // Track vote changes for pulse animations
+  useEffect(() => {
+    if (!votes || !prevVotesRef.current) {
+      prevVotesRef.current = votes;
+      return;
+    }
+
+    const newPulses: { lat: number; lng: number; color: string }[] = [];
+
+    for (const cv of votes.byCountry) {
+      if (cv.countryCode === 'XX' || cv.countryCode === 'T1') continue;
+
+      const prevCountry = prevVotesRef.current.byCountry.find(
+        (p) => p.countryCode === cv.countryCode,
+      );
+      const prevTotal = prevCountry?.total || 0;
+
+      if (cv.total > prevTotal) {
+        const coords = getCountryCoords(cv.countryCode);
+        if (coords) {
+          const winner = cv.votes.reduce((a, b) => (a.count > b.count ? a : b));
+          const color = options?.find((o) => o.id === winner.optionId)?.color || '#3B82F6';
+          newPulses.push({ ...coords, color });
+        }
+      }
+    }
+
+    if (newPulses.length > 0) {
+      setPulseRings((prev) => [...prev, ...newPulses]);
+      setTimeout(() => {
+        setPulseRings((prev) => prev.slice(newPulses.length));
+      }, 2000);
+    }
+
+    prevVotesRef.current = votes;
+  }, [votes, options]);
+
+  // Update pulse rings on globe
+  useEffect(() => {
+    if (!globeRef.current) return;
+
+    globeRef.current
+      .ringsData(pulseRings)
+      .ringColor((d: any) => (t: number) => hexToRgba(d.color, 1 - t))
+      .ringMaxRadius(4)
+      .ringPropagationSpeed(2)
+      .ringRepeatPeriod(800);
+  }, [pulseRings]);
 
   // Update colors when votes change
   useEffect(() => {
     if (!globeRef.current || !polygons.length) return;
 
-    // Build a map of country code -> color for quick lookup
     const countryColors = new Map<string, string>();
 
-    if (votes && votes.byCountry) {
+    if (votes?.byCountry) {
       for (const cv of votes.byCountry) {
-        // Skip unknown country codes
         if (cv.countryCode === 'XX' || cv.countryCode === 'T1') continue;
 
         if (cv.total > 0 && cv.votes.length > 0) {
           const winner = cv.votes.reduce((a, b) => (a.count > b.count ? a : b));
-
           let color = '#3B82F6';
           if (options) {
             const winningOption = options.find((o) => o.id === winner.optionId);
-            if (winningOption) {
-              color = winningOption.color;
-            }
+            if (winningOption) color = winningOption.color;
           } else {
-            const winnerIndex = votes.options.findIndex(
-              (o) => o.optionId === winner.optionId,
-            );
+            const winnerIndex = votes.options.findIndex((o) => o.optionId === winner.optionId);
             const defaultColors = ['#3B82F6', '#EF4444', '#10B981', '#F59E0B'];
             color = defaultColors[winnerIndex] || defaultColors[0];
           }
-
           countryColors.set(cv.countryCode, color);
         }
       }
     }
 
-    const colorFn = (d: any) => {
+    globeRef.current.polygonCapColor((d: any) => {
       const cc = getCountryCode(d);
       const color = countryColors.get(cc);
-
-      if (color) {
-        return hexToRgba(color, 0.7);
-      }
-
-      return 'rgba(100, 116, 139, 0.15)';
-    };
-
-    globeRef.current.polygonCapColor(colorFn);
+      return color ? hexToRgba(color, 0.7) : 'rgba(100, 116, 139, 0.15)';
+    });
     globeRef.current.polygonsData(polygons);
   }, [votes, options, polygons]);
+
+  // Don't render if WebGL not supported
+  if (!isSupported) {
+    return null;
+  }
 
   return (
     <>
@@ -279,7 +294,6 @@ export function Globe({ votes, options }: GlobeProps) {
         style={{ background: 'transparent' }}
       />
 
-      {/* Country Details Modal */}
       {selectedCountry && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
@@ -351,62 +365,34 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-// Approximate country center coordinates
 const COUNTRY_COORDS: Record<string, { lat: number; lng: number }> = {
-  US: { lat: 39.8, lng: -98.5 },
-  GB: { lat: 54.0, lng: -2.0 },
-  DE: { lat: 51.0, lng: 10.0 },
-  FR: { lat: 46.0, lng: 2.0 },
-  IT: { lat: 42.8, lng: 12.8 },
-  ES: { lat: 40.0, lng: -4.0 },
-  PT: { lat: 39.5, lng: -8.0 },
-  NL: { lat: 52.5, lng: 5.75 },
-  BE: { lat: 50.8, lng: 4.0 },
-  AT: { lat: 47.5, lng: 14.5 },
-  CH: { lat: 46.8, lng: 8.2 },
-  PL: { lat: 52.0, lng: 19.0 },
-  CZ: { lat: 49.8, lng: 15.5 },
-  HU: { lat: 47.0, lng: 20.0 },
-  RO: { lat: 46.0, lng: 25.0 },
-  BG: { lat: 42.7, lng: 25.5 },
-  GR: { lat: 39.0, lng: 22.0 },
-  TR: { lat: 39.0, lng: 35.0 },
-  RU: { lat: 60.0, lng: 100.0 },
-  UA: { lat: 49.0, lng: 32.0 },
-  SE: { lat: 62.0, lng: 15.0 },
-  NO: { lat: 62.0, lng: 10.0 },
-  DK: { lat: 56.0, lng: 10.0 },
-  FI: { lat: 64.0, lng: 26.0 },
-  IE: { lat: 53.0, lng: -8.0 },
-  CA: { lat: 56.0, lng: -106.0 },
-  MX: { lat: 23.0, lng: -102.0 },
-  BR: { lat: -14.0, lng: -51.0 },
-  AR: { lat: -34.0, lng: -64.0 },
-  CL: { lat: -35.0, lng: -71.0 },
-  CO: { lat: 4.0, lng: -72.0 },
-  PE: { lat: -10.0, lng: -76.0 },
-  UY: { lat: -33.0, lng: -56.0 },
-  CN: { lat: 35.0, lng: 105.0 },
-  JP: { lat: 36.0, lng: 138.0 },
-  KR: { lat: 36.0, lng: 128.0 },
-  IN: { lat: 21.0, lng: 78.0 },
-  ID: { lat: -5.0, lng: 120.0 },
-  MY: { lat: 4.0, lng: 102.0 },
-  SG: { lat: 1.3, lng: 103.8 },
-  TH: { lat: 15.0, lng: 101.0 },
-  VN: { lat: 16.0, lng: 108.0 },
-  PH: { lat: 13.0, lng: 122.0 },
-  AU: { lat: -25.0, lng: 134.0 },
-  NZ: { lat: -41.0, lng: 174.0 },
-  ZA: { lat: -29.0, lng: 24.0 },
-  EG: { lat: 27.0, lng: 30.0 },
-  NG: { lat: 10.0, lng: 8.0 },
-  KE: { lat: 1.0, lng: 38.0 },
-  MA: { lat: 32.0, lng: -6.0 },
-  SA: { lat: 24.0, lng: 45.0 },
-  AE: { lat: 24.0, lng: 54.0 },
-  IL: { lat: 31.0, lng: 35.0 },
-  PK: { lat: 30.0, lng: 70.0 },
+  US: { lat: 39.8, lng: -98.5 }, GB: { lat: 54.0, lng: -2.0 },
+  DE: { lat: 51.0, lng: 10.0 }, FR: { lat: 46.0, lng: 2.0 },
+  IT: { lat: 42.8, lng: 12.8 }, ES: { lat: 40.0, lng: -4.0 },
+  PT: { lat: 39.5, lng: -8.0 }, NL: { lat: 52.5, lng: 5.75 },
+  BE: { lat: 50.8, lng: 4.0 }, AT: { lat: 47.5, lng: 14.5 },
+  CH: { lat: 46.8, lng: 8.2 }, PL: { lat: 52.0, lng: 19.0 },
+  CZ: { lat: 49.8, lng: 15.5 }, HU: { lat: 47.0, lng: 20.0 },
+  RO: { lat: 46.0, lng: 25.0 }, BG: { lat: 42.7, lng: 25.5 },
+  GR: { lat: 39.0, lng: 22.0 }, TR: { lat: 39.0, lng: 35.0 },
+  RU: { lat: 60.0, lng: 100.0 }, UA: { lat: 49.0, lng: 32.0 },
+  SE: { lat: 62.0, lng: 15.0 }, NO: { lat: 62.0, lng: 10.0 },
+  DK: { lat: 56.0, lng: 10.0 }, FI: { lat: 64.0, lng: 26.0 },
+  IE: { lat: 53.0, lng: -8.0 }, CA: { lat: 56.0, lng: -106.0 },
+  MX: { lat: 23.0, lng: -102.0 }, BR: { lat: -14.0, lng: -51.0 },
+  AR: { lat: -34.0, lng: -64.0 }, CL: { lat: -35.0, lng: -71.0 },
+  CO: { lat: 4.0, lng: -72.0 }, PE: { lat: -10.0, lng: -76.0 },
+  UY: { lat: -33.0, lng: -56.0 }, CN: { lat: 35.0, lng: 105.0 },
+  JP: { lat: 36.0, lng: 138.0 }, KR: { lat: 36.0, lng: 128.0 },
+  IN: { lat: 21.0, lng: 78.0 }, ID: { lat: -5.0, lng: 120.0 },
+  MY: { lat: 4.0, lng: 102.0 }, SG: { lat: 1.3, lng: 103.8 },
+  TH: { lat: 15.0, lng: 101.0 }, VN: { lat: 16.0, lng: 108.0 },
+  PH: { lat: 13.0, lng: 122.0 }, AU: { lat: -25.0, lng: 134.0 },
+  NZ: { lat: -41.0, lng: 174.0 }, ZA: { lat: -29.0, lng: 24.0 },
+  EG: { lat: 27.0, lng: 30.0 }, NG: { lat: 10.0, lng: 8.0 },
+  KE: { lat: 1.0, lng: 38.0 }, MA: { lat: 32.0, lng: -6.0 },
+  SA: { lat: 24.0, lng: 45.0 }, AE: { lat: 24.0, lng: 54.0 },
+  IL: { lat: 31.0, lng: 35.0 }, PK: { lat: 30.0, lng: 70.0 },
   BD: { lat: 24.0, lng: 90.0 },
 };
 
