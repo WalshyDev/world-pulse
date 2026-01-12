@@ -1,0 +1,99 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "world-pulse",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-11",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Custom domain routes
+  "routes": [
+    { "pattern": "worldpulse.quickbyte.games", "custom_domain": true }
+  ],
+
+  // Assets - serves the frontend
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"],
+    "not_found_handling": "single-page-application"
+  },
+
+  // D1 Database
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "world-pulse-db",
+      "database_id": "a698e4f4-21bc-4e53-8981-2e4f4fdb04fd",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // KV Namespaces
+  "kv_namespaces": [
+    {
+      "binding": "CACHE",
+      "id": "5feb4aef43d94854bee6b5986207797c"
+    }
+  ],
+
+  // R2 Buckets
+  "r2_buckets": [
+    {
+      "binding": "SHARE_CARDS",
+      "bucket_name": "world-pulse-share-cards"
+    }
+  ],
+
+  // Workers AI
+  "ai": {
+    "binding": "AI"
+  },
+
+  "analytics_engine_datasets": [
+    {
+      "binding": "ANALYTICS",
+      "dataset": "worldpulse"
+    }
+  ],
+
+  // Durable Objects
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "VOTE_AGGREGATOR",
+        "class_name": "VoteAggregator"
+      },
+      {
+        "name": "COUNTRY_VOTES",
+        "class_name": "CountryVotes"
+      }
+    ]
+  },
+
+  // Migrations for Durable Objects
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["VoteAggregator", "CountryVotes"]
+    }
+  ],
+
+  // Scheduled triggers - runs at midnight UTC daily
+  "triggers": {
+    "crons": ["0 0 * * *"]
+  },
+
+  // Observability - logs and tracing
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true
+    }
+  },
+
+  // Development settings
+  "dev": {
+    "port": 8787,
+    "inspector_port": 9229
+  }
+}

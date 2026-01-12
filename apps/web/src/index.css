@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+:root {
+  --color-primary: #3B82F6;
+  --color-secondary: #1E293B;
+  --color-accent: #F59E0B;
+}
+
+body {
+  @apply bg-slate-900 text-white antialiased;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+#root {
+  @apply min-h-screen;
+}
